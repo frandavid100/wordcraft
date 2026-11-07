@@ -1,4 +1,4 @@
-name: Leaf issue 107 validation
+name: Leaf issue 99 validation
 on:
   workflow_dispatch:
 permissions:
@@ -17,8 +17,8 @@ jobs:
       cache-version: leaf-columns-v3
       timeout-minutes: 60
       command: |
-        git fetch --no-tags https://github.com/frandavid100/wordcraft.git 2f25b4e20d583a159e92caefe790674fc45126ea
-        git checkout --detach 2f25b4e20d583a159e92caefe790674fc45126ea
-        echo "LEAF_107_TESTED_COMMIT $(git rev-parse HEAD)"
-        cargo test -p wordcraft-engine --lib a_picture_with_wrap_spacing_dropped_after_a_leading_break_stays_there
+        git fetch --no-tags https://github.com/frandavid100/wordcraft.git 91ac1c143729ebe8f192fbaa1fb71b6a92e40e92
+        git checkout --detach 91ac1c143729ebe8f192fbaa1fb71b6a92e40e92
+        echo "LEAF_99_TESTED_COMMIT $(git rev-parse HEAD)"
+        cargo test -p wordcraft-engine --test table_footnote_clearance
         cargo xtask ci
