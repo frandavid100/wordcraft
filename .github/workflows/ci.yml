@@ -17,8 +17,8 @@ jobs:
       cache-version: leaf-columns-v3
       timeout-minutes: 60
       command: |
-        git fetch --no-tags https://github.com/frandavid100/wordcraft.git 91ac1c143729ebe8f192fbaa1fb71b6a92e40e92
-        git checkout --detach 91ac1c143729ebe8f192fbaa1fb71b6a92e40e92
+        git fetch --no-tags https://github.com/frandavid100/wordcraft.git a8f688de733e743a776b3dda37b174dc2861cba4
+        git checkout --detach a8f688de733e743a776b3dda37b174dc2861cba4
         echo "LEAF_99_TESTED_COMMIT $(git rev-parse HEAD)"
         cargo test -p wordcraft-engine --test table_footnote_clearance
         cargo xtask ci
