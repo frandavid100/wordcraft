@@ -11,6 +11,7 @@ jobs:
       tools: ''
       dev-debug: '0'
       cache-save-on-dispatch: true
+      cache-version: leaf-columns-v2
       timeout-minutes: 60
       command: |
         cat > /tmp/leaf-probe.rs <<'LEAF_RUST'
@@ -161,10 +162,10 @@ jobs:
         
         git fetch --no-tags https://github.com/storytold/wordcraft.git 729cd0a5fc953bbedbfdec4f6af18ad6d1780b3b
         git fetch --no-tags https://github.com/storytold/wordcraft.git refs/pull/2422/head:refs/remotes/probe/pr2422
-        for revision in 729cd0a5fc953bbedbfdec4f6af18ad6d1780b3b refs/remotes/probe/pr2422; do
+        for revision in refs/remotes/probe/pr2422; do
           git checkout --detach "$revision"
           echo "LEAF_REVISION $(git rev-parse HEAD)"
-          cat /tmp/leaf-probe.rs >> crates/engine/src/tests.rs
+          sed 's/Arc::make_mut(\&mut s.doc.styles)/s.doc.styles/g' /tmp/leaf-probe.rs >> crates/engine/src/tests.rs
           cargo test -p wordcraft-engine --lib leaf_probe --no-run
           status=0
           cargo test -p wordcraft-engine --lib leaf_probe -- --nocapture --test-threads=1 2>&1 | tee /tmp/leaf-probe.log || status=$?
