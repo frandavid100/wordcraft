@@ -159,7 +159,8 @@ jobs:
         }
         LEAF_RUST
         
-        git fetch https://github.com/storytold/wordcraft.git refs/pull/2422/head:refs/remotes/probe/pr2422
+        git fetch --no-tags https://github.com/storytold/wordcraft.git 729cd0a5fc953bbedbfdec4f6af18ad6d1780b3b
+        git fetch --no-tags https://github.com/storytold/wordcraft.git refs/pull/2422/head:refs/remotes/probe/pr2422
         for revision in 729cd0a5fc953bbedbfdec4f6af18ad6d1780b3b refs/remotes/probe/pr2422; do
           git checkout --detach "$revision"
           echo "LEAF_REVISION $(git rev-parse HEAD)"
