@@ -1,28 +1,173 @@
-name: CI
-
-# Quality gates for every push to main and every pull request (`cargo xtask ci`), through the
-# suite's shared gate workflow in craft-common-actions.
+name: Leaf column diagnostics
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
-# A newer push to a PR branch cancels its older run; every push to main runs to the end.
-concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-  gate:
-    # Tracks @main so suite-wide CI fixes reach every app without a PR in each repository.
+  probe:
     uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
     with:
-      # Same craft-fonts commit as release.yml.
       craft-fonts-ref: b076417b5880bd4154bd22f00695b1d28c6bea83
-      packages: >-
-        pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
-        libgtk-3-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
+      tools: ''
+      dev-debug: '0'
+      cache-save-on-dispatch: true
+      timeout-minutes: 60
+      command: |
+        cat > /tmp/leaf-probe.rs <<'LEAF_RUST'
+        #[cfg(test)]
+        mod leaf_probe {
+            use crate::{Session, layout};
+            use serde_json::{Value, json};
+            use std::sync::Arc;
+            use wordcraft_doc::{Document, Pos, StoryRef};
+            use wordcraft_doc::section::SectionProps;
+            use layout::Placed;
+        
+            fn command(s: &mut Session, id: &str, params: Value) -> Value {
+                s.run(id, &params).unwrap_or_else(|e| panic!("{id}: {e}"))
+            }
+        
+            fn fixture(mut options: Value, selected: bool, repeats: usize) -> (Session, usize, usize, usize, SectionProps, String) {
+                let paragraph = "Synthetic column layout example with ordinary words that should wrap at each configured boundary. ".repeat(repeats);
+                let paragraph = paragraph.trim_end().to_string();
+                let mut s = Session::new(Document::new());
+                command(&mut s, "document.setText", json!({"text": format!("Before the columns.\n{paragraph}\nAfter the columns.")}));
+                Arc::make_mut(&mut s.doc.styles).default_chr.font = Some("Source Sans 3".into());
+                Arc::make_mut(&mut s.doc.styles).default_chr.size = Some(12.0);
+                if selected { command(&mut s, "select.text", json!({"text": paragraph})); }
+                options["apply"] = json!(if selected { "selection" } else { "document" });
+                let sect: SectionProps = serde_json::from_value(command(&mut s, "layout.columns", options)).unwrap();
+                let block = (0..s.doc.body.len()).find(|&i| s.doc.para_at(&Pos::body(i, 0)).is_some_and(|p| p.text == paragraph)).unwrap();
+                let (first, last) = {
+                    let sections = s.doc.sections();
+                    let i = sections.iter().position(|(end, _)| block <= *end).unwrap();
+                    (if i == 0 { 0 } else { sections[i - 1].0 + 1 }, sections[i].0)
+                };
+                (s, block, first, last, sect, paragraph)
+            }
+        
+            fn separator_case(count: u32, selected: bool, repeats: usize) {
+                let (mut s, _, first, last, sect, _) = fixture(json!({"count": count, "space": 18, "separator": true}), selected, repeats);
+                let l = s.layout();
+                let boxes = sect.column_boxes();
+                let expected_x: Vec<_> = boxes.windows(2).map(|w| sect.margin_left + sect.gutter + (w[0].0 + w[0].1 + w[1].0) / 2.0).collect();
+                let mut populated = 0;
+                for (pi, page) in l.pages.iter().enumerate() {
+                    let mut top = f32::MAX;
+                    let mut bottom = f32::MIN;
+                    for item in &page.items {
+                        if let Placed::Lines { story: StoryRef::Body, path, para, l0, l1, y, .. } = item {
+                            if path.0.len() != 1 || !(first..=last).contains(&(path.0[0] as usize)) { continue; }
+                            let base = para.lines[*l0].top;
+                            for line in &para.lines[*l0..*l1] {
+                                top = top.min(y + line.top - base);
+                                bottom = bottom.max(y + line.top - base + line.height);
+                            }
+                        }
+                    }
+                    let rules: Vec<_> = page.items.iter().filter_map(|it| match it {
+                        Placed::Rule { x0, y0, x1, y1, .. } if (x0 - x1).abs() < 0.01 => Some((*x0, *y0, *y1)),
+                        _ => None,
+                    }).collect();
+                    if bottom < top { assert!(rules.is_empty()); continue; }
+                    populated += 1;
+                    println!("LEAF_SEPARATOR count={count} selection={selected} repeats={repeats} page={} rules={} text={top:.2}..{bottom:.2} geometry={rules:?}", pi + 1, rules.len());
+                    assert_eq!(rules.len(), count as usize - 1);
+                    for x in &expected_x {
+                        let rule = rules.iter().find(|r| (r.0 - x).abs() < 0.5).expect("a rule in every gap");
+                        assert!((rule.1 - top).abs() < 0.6 && (rule.2 - bottom).abs() < 0.6, "section extent: {rule:?} vs {top}..{bottom}");
+                    }
+                    let draws = layout::display::page_display(&s.doc, page, &Default::default());
+                    let drawn = draws.iter().filter(|d| matches!(d, layout::display::Draw::Line { x0, x1, y0, y1, .. } if (x0-x1).abs() < 0.01 && y1 > y0)).count();
+                    assert_eq!(drawn, rules.len(), "rules reach the renderer");
+                }
+                assert!(populated >= if repeats > 12 { 2 } else { 1 });
+            }
+        
+            fn width_case(name: &str, options: Value, selected: bool) {
+                let (mut s, block, _, _, sect, paragraph) = fixture(options, selected, 120);
+                let l = s.layout();
+                let boxes = sect.column_boxes();
+                let mut used = vec![0.0f32; boxes.len()];
+                let mut lines = vec![0usize; boxes.len()];
+                let mut overflow = 0usize;
+                let mut spans = Vec::new();
+                for page in &l.pages {
+                    for item in &page.items {
+                        if let Placed::Lines { story: StoryRef::Body, path, para, l0, l1, x, .. } = item {
+                            if path.0 != [block as u32] { continue; }
+                            let col = boxes.iter().position(|(offset, _)| (x - (sect.margin_left + sect.gutter + offset)).abs() < 0.6).unwrap();
+                            let width = boxes[col].1;
+                            for line in &para.lines[*l0..*l1] {
+                                lines[col] += 1;
+                                for k in line.c0..line.c1 {
+                                    let cluster = &para.clusters[k];
+                                    spans.push((cluster.start, cluster.end));
+                                    if cluster.kind != layout::para::ClKind::Text { continue; }
+                                    let edge = line.cl_right(k).unwrap();
+                                    used[col] = used[col].max(edge);
+                                    if edge > width + 0.6 { overflow += 1; }
+                                }
+                            }
+                        }
+                    }
+                }
+                println!("LEAF_WIDTH name={name} selection={selected} pages={} boxes={boxes:?} lines={lines:?} max_text_x={used:?} overflow_clusters={overflow}", l.pages.len());
+                assert_eq!(overflow, 0, "text must stay inside its column");
+                for (i, (_, width)) in boxes.iter().enumerate() {
+                    assert!(lines[i] > 3 && used[i] > width * 0.75, "column {i} must use its own width: {} of {width}", used[i]);
+                }
+                spans.sort_unstable();
+                let mut end = 0;
+                for (a, b) in spans { assert_eq!(a, end, "no duplicated or lost text"); end = b; }
+                assert_eq!(end, paragraph.len());
+            }
+        
+            #[test]
+            fn separators() {
+                let mut failures = 0;
+                for count in [2, 3, 4] { for selected in [false, true] { for repeats in [12, 120] {
+                    let result = std::panic::catch_unwind(|| separator_case(count, selected, repeats));
+                    println!("LEAF_RESULT separators count={count} selection={selected} repeats={repeats} {}", if result.is_ok() { "PASS" } else { "FAIL" });
+                    failures += usize::from(result.is_err());
+                } } }
+                assert_eq!(failures, 0);
+            }
+        
+            #[test]
+            fn unequal_widths() {
+                let mut failures = 0;
+                for selected in [false, true] {
+                    for (name, options) in [
+                        ("left", json!({"preset": "left", "space": 18})),
+                        ("right", json!({"preset": "right", "space": 18})),
+                        ("custom-left", json!({"widths": [[110,18],[340,0]]})),
+                        ("custom-right", json!({"widths": [[300,18],[150,0]]})),
+                    ] {
+                        let result = std::panic::catch_unwind(|| width_case(name, options, selected));
+                        println!("LEAF_RESULT widths name={name} selection={selected} {}", if result.is_ok() { "PASS" } else { "FAIL" });
+                        failures += usize::from(result.is_err());
+                    }
+                }
+                assert_eq!(failures, 0);
+            }
+        
+            #[test]
+            fn equal_width_control() {
+                for selected in [false, true] { width_case("equal", json!({"count": 2, "space": 18}), selected); }
+            }
+        }
+        LEAF_RUST
+        
+        git fetch https://github.com/storytold/wordcraft.git refs/pull/2422/head:refs/remotes/probe/pr2422
+        for revision in 729cd0a5fc953bbedbfdec4f6af18ad6d1780b3b refs/remotes/probe/pr2422; do
+          git checkout --detach "$revision"
+          echo "LEAF_REVISION $(git rev-parse HEAD)"
+          cat /tmp/leaf-probe.rs >> crates/engine/src/tests.rs
+          cargo test -p wordcraft-engine --lib leaf_probe --no-run
+          status=0
+          cargo test -p wordcraft-engine --lib leaf_probe -- --nocapture --test-threads=1 2>&1 | tee /tmp/leaf-probe.log || status=$?
+          echo "LEAF_SUITE_STATUS $revision $status"
+          grep '^LEAF_' /tmp/leaf-probe.log >> "$GITHUB_STEP_SUMMARY" || true
+          git restore crates/engine/src/tests.rs
+        done
