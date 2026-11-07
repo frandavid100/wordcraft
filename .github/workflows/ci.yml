@@ -1,4 +1,4 @@
-name: Leaf column port validation
+name: Leaf issue 152 validation
 on:
   workflow_dispatch:
 permissions:
@@ -17,50 +17,9 @@ jobs:
       cache-version: leaf-columns-v3
       timeout-minutes: 60
       command: |
-        git fetch --no-tags https://github.com/storytold/wordcraft.git 729cd0a5fc953bbedbfdec4f6af18ad6d1780b3b e2b89bbd67c9c1bdd1cc0d925cd72cb2017745c5
-        git fetch --no-tags https://github.com/frandavid100/wordcraft.git ae16e1a3c833cdd79ff026450ef5f3a20dd09f8c
-        git show ae16e1a3c833cdd79ff026450ef5f3a20dd09f8c:.github/workflows/ci.yml > /tmp/diagnostic.yml
-        python3 - <<'EXTRACT'
-        from pathlib import Path
-        s=Path('/tmp/diagnostic.yml').read_text()
-        s=s.split("cat > /tmp/leaf-probe.rs <<'LEAF_RUST'\n",1)[1].split('        LEAF_RUST',1)[0]
-        Path('/tmp/leaf-probe.rs').write_text('\n'.join(l[8:] for l in s.splitlines())+'\n')
-        EXTRACT
-        git checkout --detach 729cd0a5fc953bbedbfdec4f6af18ad6d1780b3b
-        python3 - <<'PORT'
-        from pathlib import Path
-        import subprocess
-        patch = subprocess.check_output(['git', 'diff', '25ad07f86876f20ee3eed99ee46a1c59a0592992', 'e2b89bbd67c9c1bdd1cc0d925cd72cb2017745c5', '--', 'crates/layout/src/lib.rs'], text=True)
-        added = '\n'.join(l[1:] for l in patch.splitlines() if l.startswith('+') and not l.startswith('+++'))+'\n'
-        helper = added[added.index('/// The line a paragraph laid out again'):added.index('    // How many times its lines were broken again')]
-        p=Path('crates/layout/src/flow.rs'); s=p.read_text()
-        s=s.replace('use crate::WRAP_RELAYS;', 'use crate::WRAP_RELAYS;\nuse wordcraft_doc::props::Align;')
-        pos=s.index('/// Run '+chr(96)+'f'+chr(96)+' with '+chr(96)+'map'+chr(96))
-        s=s[:pos]+'/// Bound repeated layouts when a paragraph crosses unequal columns (#2382).\nconst MAX_WIDTH_RELAYS: usize = 64;\n\n#[cfg(test)]\nthread_local! {\n    pub(crate) static WIDTH_RELAYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };\n}\n\n'+helper+'\n'+s[pos:]
-        s=s.replace('    wrap_relays: usize,', '    wrap_relays: usize,\n    width_relays: usize,')
-        s=s.replace('            wrap_relays: 0,', '            wrap_relays: 0,\n            width_relays: 0,')
-        method="    /// Break a natural overflow for the destination column's width (#2382), retaining the\n    /// already placed text and floats. Equal-width columns need no additional layout.\n    fn relay_width(&mut self, ctx: &mut Ctx, pb: &PageBuilder) {\n        if self.l0 == 0 || pb.web || self.width_relays >= MAX_WIDTH_RELAYS || (pb.col_w() - self.laid_width).abs() <= 0.5 {\n            return;\n        }\n        let Some((resume, t)) = self.pl.lines.get(self.l0).map(|l| (l.start, l.top)) else { return };\n        self.width_relays += 1;\n        ctx.fields.page = self.laid_page;\n        #[cfg(test)]\n        WIDTH_RELAYS.with(|c| c.set(c.get() + 1));\n        let width_now = pb.col_w();\n        // The old column's exclusions must not follow the text into another column. A new\n        // width can move the resume's top, so resolve the destination's areas from that top\n        // once more; a top that still moves leaves the previous layout in place.\n        let mut offset = t;\n        let mut here = continued_exclusions(&[], &body_wraps(ctx, pb), pb.col_x(), pb.y, offset, width_now);\n        let (p, eq_start, label) = (self.p, self.eq_start, &self.label);\n        let mut relaid = with_page_map(ctx, &mut self.page_map, |ctx| {\n            again(ctx, eq_start, |ctx| ctx.para_labelled(p, width_now, None, &here, label.clone()))\n        });\n        let mut relayed = resume_relaid(&relaid, resume);\n        let moved = relayed.as_ref().and_then(|(k, r)| r.lines.get(*k)).map(|l| l.top);\n        if let Some(t1) = moved\n            && (t1 - offset).abs() > 0.01\n            && !here.is_empty()\n        {\n            offset = t1;\n            here = continued_exclusions(&[], &body_wraps(ctx, pb), pb.col_x(), pb.y, offset, width_now);\n            relaid = with_page_map(ctx, &mut self.page_map, |ctx| {\n                again(ctx, eq_start, |ctx| ctx.para_labelled(p, width_now, None, &here, label.clone()))\n            });\n            relayed = match resume_relaid(&relaid, resume) {\n                Some((k, r)) if r.lines.get(k).is_some_and(|l| (l.top - offset).abs() < 0.01) => Some((k, r)),\n                _ => None,\n            };\n        }\n        if let Some((k, relaid)) = relayed {\n            (self.pl, self.rel, self.l0) = (relaid, here, k);\n            self.laid_width = width_now;\n        }\n    }\n\n"
-        s=s.replace('    /// The lines going into a new column (or page)',method+'    /// The lines going into a new column (or page)',1)
-        s=s.replace('        f.place_due_late(ctx, pb);','        f.place_due_late(ctx, pb);\n        f.relay_width(ctx, pb);',1)
-        s=s.replace('        let end = push_para(&mut items, (StoryRef::Body, &[self.block as u32]), &self.pl, (l0, l1), (x, y), self.width, edges);', '        // Decoration follows the column this piece occupies, including after a width relay.\n        let col_w = pb.col_w();\n        let end = push_para(&mut items, (StoryRef::Body, &[self.block as u32]), &self.pl, (l0, l1), (x, y), col_w, edges);')
-        s=s.replace('            col: (x, self.width),','            col: (x, col_w),')
-        p.write_text(s)
-        p=Path('crates/layout/src/para.rs');s=p.read_text().replace('    fn auto_space_after(', '    pub(crate) fn auto_space_after(');p.write_text(s)
-        patch=subprocess.check_output(['git','diff','25ad07f86876f20ee3eed99ee46a1c59a0592992','e2b89bbd67c9c1bdd1cc0d925cd72cb2017745c5','--','crates/layout/src/tests.rs'],text=True)
-        tests='\n'.join(l[1:] for l in patch.splitlines() if l.startswith('+') and not l.startswith('+++'))+'\n'
-        Path('crates/layout/src/tests/unequal_columns.rs').write_text('use super::*;\nuse crate::flow::WIDTH_RELAYS;\n\n'+tests)
-        p=Path('crates/layout/src/tests.rs');p.write_text(p.read_text().replace('mod vertical;','mod vertical;\nmod unequal_columns;'))
-        PORT
-        cargo fmt --all
-        cargo test -p wordcraft-layout --lib
-        cargo clippy -p wordcraft-layout --all-targets -- -D warnings
-        cat /tmp/leaf-probe.rs >> crates/engine/src/tests.rs
-        cargo test -p wordcraft-engine --lib leaf_probe -- --nocapture --test-threads=1
-        git restore crates/engine/src/tests.rs
-        echo PORT_FORMATTED_DIFF_BEGIN
-        git diff -- crates/layout/src/flow.rs crates/layout/src/para.rs crates/layout/src/tests.rs
-        echo PORT_FORMATTED_DIFF_END
-        echo PORT_FORMATTED_TESTS_BEGIN
-        cat crates/layout/src/tests/unequal_columns.rs
-        echo PORT_FORMATTED_TESTS_END
+        git fetch --no-tags https://github.com/frandavid100/wordcraft.git 4d1f272693542150398088179b7dee7f6687d3f8
+        git checkout --detach 4d1f272693542150398088179b7dee7f6687d3f8
+        echo "LEAF_152_TESTED_COMMIT $(git rev-parse HEAD)"
+        cargo test -p wordcraft-doc -p wordcraft-engine --test empty_paragraph_merge
         cargo xtask ci
+
